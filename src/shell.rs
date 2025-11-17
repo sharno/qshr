@@ -316,6 +316,8 @@ impl<T> Shell<T> {
     }
 
     /// Applies a function to chunks in parallel when the `parallel` feature is enabled.
+    ///
+    /// Requires `--features parallel` (brings in the optional `rayon` dependency).
     #[cfg(feature = "parallel")]
     pub fn chunk_map_parallel<F, U>(self, chunk_size: usize, f: F) -> Shell<U>
     where

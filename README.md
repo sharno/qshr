@@ -50,9 +50,29 @@ fn main() -> crab_shell::Result<()> {
 - `examples/pipeline_stream.rs` shows how to compose commands in a pipeline while streaming stdout incrementally.
 - `examples/watch.rs` polls a directory for file creations, modifications, and removals.
 - `examples/watch_trigger.rs` triggers a command (here `echo`) when file events occur.
+- `examples/watch_build.rs` mimics a rebuild-on-change workflow using the watch helper.
 - `examples/chunk_map_parallel.rs` demonstrates how to enable the `parallel` feature and process data chunks concurrently.
+- `examples/async_run.rs` uses the `async` feature to run commands via `tokio`.
+- `examples/async_pipeline.rs` streams pipeline output asynchronously (requires `--features async`).
+- `examples/async_watch.rs` polls directories asynchronously using `watch_async`.
+- `examples/async_watch_stream.rs` consumes `watch_async_stream` as a `Stream`.
+- `examples/watch_debounce.rs` shows how to filter noisy change events using `debounce_watch`.
+- `examples/watch_glob.rs` filters watch events by glob pattern.
+
+### Watch helpers
+
+Directory watching is implemented via lightweight polling. Use `Watcher` for manual control, call `watch(path, interval, iterations)` to receive a `Shell<WatchEvent>`, chain utilities like `debounce_watch` + `watch_glob`, or call `watch_filtered` for a one-stop helper. With `--features async`, use `watch_async`, `watch_async_stream`, or `watch_filtered_async`.
 
 Run an example with `cargo run --example glob_walk`.
+
+## Features
+
+- `parallel`: enables `Shell::chunk_map_parallel`, which uses `rayon` to process chunks concurrently. Activate with `cargo run --features parallel --example chunk_map_parallel` (or set `default-features = false` and opt-in within your own `Cargo.toml`). Run tests with `cargo test --features parallel` if you want to cover the parallel-only unit test.
+- `async`: enables async command helpers (`Command::output_async`, `run_async`, etc.) built on `tokio`. Run `cargo run --features async --example async_run` or `cargo test --features async` to exercise them.
+
+### Watch helpers
+
+Directory watching is implemented via lightweight polling. Use `Watcher` for manual control, call `watch(path, interval, iterations)` to receive a `Shell<WatchEvent>`, or use `watch_async_stream` (with `--features async`) to obtain a `Stream<Item = Result<WatchEvent>>`. See `examples/watch*.rs` for sync recipes and `examples/async_watch*.rs` for async ones.
 
 ## Status
 

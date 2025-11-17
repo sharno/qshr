@@ -10,6 +10,9 @@ use std::{
     thread,
 };
 
+#[cfg(feature = "async")]
+use tokio::{io::AsyncWriteExt, process::Command as TokioCommand, task};
+
 /// Builder that mirrors `std::process::Command` but surfaces a friendlier API
 /// tailored for composing pipelines.
 #[derive(Debug, Clone)]
@@ -280,6 +283,45 @@ impl Command {
         Ok(output)
     }
 
+    /// Executes the command asynchronously (requires the `async` feature).
+    #[cfg(feature = "async")]
+    pub async fn output_async(&self) -> Result<CommandOutput> {
+        let mut command = self.build_tokio_command();
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        if let Some(input) = &self.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(input).await?;
+            }
+        }
+        let output = child.wait_with_output().await?;
+        if !output.status.success() {
+            return Err(Error::Command {
+                program: self.program.clone(),
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(CommandOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    /// Runs the command asynchronously, inheriting parent stdio when configured.
+    #[cfg(feature = "async")]
+    pub async fn run_async(&self) -> Result<()> {
+        self.output_async().await.map(|_| ())
+    }
+
+    /// Reads stdout asynchronously as UTF-8 text.
+    #[cfg(feature = "async")]
+    pub async fn read_async(&self) -> Result<String> {
+        Ok(self.output_async().await?.stdout_string()?)
+    }
+
     /// Creates a [`Pipeline`] with another command.
     pub fn pipe(self, next: Command) -> Pipeline {
         Pipeline::new(self, next)
@@ -371,6 +413,24 @@ impl Command {
         Ok(Shell::new(ReceiverIter::new(rx)))
     }
 
+    /// Streams stdout asynchronously by delegating to the blocking implementation.
+    #[cfg(feature = "async")]
+    pub async fn stream_lines_async(&self) -> Result<Shell<Result<String>>> {
+        let cmd = self.clone();
+        let lines = task::spawn_blocking(move || {
+            let shell = cmd.stream_lines()?;
+            Ok::<Vec<Result<String>>, Error>(shell.collect())
+        })
+            .await
+            .map_err(|err| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("stream task panicked: {err}"),
+                ))
+            })??;
+        Ok(Shell::from_iter(lines))
+    }
+
     fn spawn_and_wait(&self) -> Result<Output> {
         let mut command = self.build_std_command();
         command.stdout(Stdio::piped());
@@ -386,6 +446,25 @@ impl Command {
 
     fn build_std_command(&self) -> StdCommand {
         let mut command = StdCommand::new(&self.program);
+        command.args(&self.args);
+        if self.clear_env {
+            command.env_clear();
+        }
+        command.envs(self.env.iter().cloned());
+        if let Some(dir) = &self.current_dir {
+            command.current_dir(dir);
+        }
+        if self.stdin.is_some() {
+            command.stdin(Stdio::piped());
+        } else if self.inherit_stdin {
+            command.stdin(Stdio::inherit());
+        }
+        command
+    }
+
+    #[cfg(feature = "async")]
+    fn build_tokio_command(&self) -> TokioCommand {
+        let mut command = TokioCommand::new(&self.program);
         command.args(&self.args);
         if self.clear_env {
             command.env_clear();
@@ -572,6 +651,24 @@ impl Pipeline {
         }
         unreachable!("pipeline always has at least one stage")
     }
+
+    /// Streams stdout asynchronously by delegating to the blocking implementation.
+    #[cfg(feature = "async")]
+    pub async fn stream_lines_async(&self) -> Result<Shell<Result<String>>> {
+        let pipe = self.clone();
+        let lines = task::spawn_blocking(move || {
+            let shell = pipe.stream_lines()?;
+            Ok::<Vec<Result<String>>, Error>(shell.collect())
+        })
+            .await
+            .map_err(|err| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("pipeline stream task panicked: {err}"),
+                ))
+            })??;
+        Ok(Shell::from_iter(lines))
+    }
 }
 
 struct ReceiverIter<T> {
@@ -661,6 +758,40 @@ mod tests {
     fn run_inherits_stdio() {
         assert!(sh("exit 0").run().is_ok());
         assert!(sh("exit 1").run().is_err());
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_output_executes() -> Result<()> {
+        let output = sh("echo async").output_async().await?;
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .to_lowercase()
+            .contains("async"));
+        Ok(())
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_stream_lines() -> Result<()> {
+        let lines: Result<Vec<_>> = sh("echo a && echo b")
+            .stream_lines_async()
+            .await?
+            .collect();
+        let lines = lines?
+            .into_iter()
+            .map(|line| line.trim().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
+        Ok(())
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn async_pipeline_stream_lines() -> Result<()> {
+        let pipeline = sh("echo c && echo d").pipe(sh("more"));
+        let lines: Result<Vec<_>> = pipeline.stream_lines_async().await?.collect();
+        assert!(lines?.len() >= 2);
+        Ok(())
     }
 
     #[test]
