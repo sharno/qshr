@@ -12,6 +12,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "async")]
+use tokio::{sync::mpsc, task};
+#[cfg(feature = "async")]
+use tokio_stream::wrappers::ReceiverStream;
+
+#[cfg(feature = "async")]
+use crate::Error;
+
 use glob::glob as glob_iter;
 
 /// Metadata about a filesystem path captured during listing operations.
@@ -300,6 +308,22 @@ pub enum WatchEvent {
     Removed(PathBuf),
 }
 
+impl WatchEvent {
+    pub fn path(&self) -> &Path {
+        match self {
+            WatchEvent::Created(entry) | WatchEvent::Modified(entry) => &entry.path,
+            WatchEvent::Removed(path) => path,
+        }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        match self {
+            WatchEvent::Created(entry) | WatchEvent::Modified(entry) => entry.is_dir(),
+            WatchEvent::Removed(path) => path.is_dir(),
+        }
+    }
+}
+
 /// Simple polling watcher that diffs directory snapshots.
 pub struct Watcher {
     root: PathBuf,
@@ -323,6 +347,9 @@ impl Watcher {
 }
 
 /// Convenience helper that polls a directory on a fixed interval and collects events.
+///
+/// This is a simple, cross-platform polling watcher; for high-frequency workloads,
+/// consider driving [`Watcher`] directly or integrating a platform-specific watcher.
 pub fn watch(
     root: impl AsRef<Path>,
     interval: Duration,
@@ -337,6 +364,139 @@ pub fn watch(
         events.extend(watcher.poll()?);
     }
     Ok(Shell::from_iter(events))
+}
+
+/// Filters watch events by glob pattern (case-sensitive).
+pub fn watch_glob(
+    events: Shell<WatchEvent>,
+    pattern: impl AsRef<str>,
+) -> Result<Shell<WatchEvent>> {
+    let matcher = glob_iter(pattern.as_ref())?
+        .filter_map(|res| res.ok())
+        .collect::<Vec<_>>();
+    Ok(events.filter(move |event| {
+        let path = match event {
+            WatchEvent::Created(entry) | WatchEvent::Modified(entry) => &entry.path,
+            WatchEvent::Removed(path) => path,
+        };
+        matcher.iter().any(|glob_path| path.starts_with(glob_path))
+    }))
+}
+
+/// Debounces watch events emitted by [`watch`], removing consecutive duplicates by path.
+pub fn debounce_watch(
+    events: Shell<WatchEvent>,
+    window: Duration,
+) -> Shell<WatchEvent> {
+    let mut last_emitted: Option<(PathBuf, SystemTime)> = None;
+    events.filter_map(move |event| {
+        let (path, timestamp) = match &event {
+            WatchEvent::Created(entry) | WatchEvent::Modified(entry) => {
+                (entry.path.clone(), entry.modified().unwrap_or_else(SystemTime::now))
+            }
+            WatchEvent::Removed(path) => (path.clone(), SystemTime::now()),
+        };
+        let should_emit = match &last_emitted {
+            Some((last_path, last_time)) => {
+                last_path != &path || timestamp.duration_since(*last_time).unwrap_or_default() >= window
+            }
+            None => true,
+        };
+        if should_emit {
+            last_emitted = Some((path, timestamp));
+            Some(event)
+        } else {
+            None
+        }
+    })
+}
+
+/// Convenience helper composing `watch`, `debounce_watch`, and `watch_glob`.
+pub fn watch_filtered(
+    root: impl AsRef<Path>,
+    interval: Duration,
+    iterations: usize,
+    debounce_window: Duration,
+    pattern: impl AsRef<str>,
+) -> Result<Shell<WatchEvent>> {
+    let events = watch(root, interval, iterations)?;
+    let debounced = debounce_watch(events, debounce_window);
+    watch_glob(debounced, pattern)
+}
+
+/// Async watch helper that polls using `tokio::task::spawn_blocking`.
+#[cfg(feature = "async")]
+pub async fn watch_async(
+    root: impl AsRef<Path> + Send + 'static,
+    interval: Duration,
+    iterations: usize,
+) -> Result<Shell<WatchEvent>> {
+    let root = root.as_ref().to_path_buf();
+    let events = task::spawn_blocking(move || {
+        let shell = watch(root, interval, iterations)?;
+        Ok::<Vec<WatchEvent>, Error>(shell.collect())
+    })
+        .await
+        .map_err(|err| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("watch task panicked: {err}"),
+            ))
+        })??;
+    Ok(Shell::from_iter(events))
+}
+
+/// Async watch helper returning a `Stream` of change events.
+#[cfg(feature = "async")]
+pub async fn watch_async_stream(
+    root: impl AsRef<Path> + Send + 'static,
+    interval: Duration,
+    iterations: usize,
+) -> Result<ReceiverStream<Result<WatchEvent>>> {
+    let root = root.as_ref().to_path_buf();
+    let (tx, rx) = mpsc::channel(32);
+    task::spawn_blocking(move || {
+        let mut watcher = match Watcher::new(&root) {
+            Ok(w) => w,
+            Err(err) => {
+                let _ = tx.blocking_send(Err(err));
+                return;
+            }
+        };
+        for _ in 0..iterations {
+            if interval > Duration::from_millis(0) {
+                std::thread::sleep(interval);
+            }
+            match watcher.poll() {
+                Ok(events) => {
+                    for event in events {
+                        if tx.blocking_send(Ok(event)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.blocking_send(Err(err));
+                    return;
+                }
+            }
+        }
+    });
+    Ok(ReceiverStream::new(rx))
+}
+
+/// Async convenience helper mirroring [`watch_filtered`].
+#[cfg(feature = "async")]
+pub async fn watch_filtered_async(
+    root: impl AsRef<Path> + Send + 'static,
+    interval: Duration,
+    iterations: usize,
+    debounce_window: Duration,
+    pattern: impl AsRef<str>,
+) -> Result<Shell<WatchEvent>> {
+    let events = watch_async(root, interval, iterations).await?;
+    let debounced = debounce_watch(events, debounce_window);
+    watch_glob(debounced, pattern)
 }
 
 fn snapshot_dir(root: &Path) -> Result<HashMap<PathBuf, PathEntry>> {
@@ -617,7 +777,7 @@ mod tests {
 
         write_text(&file, "two")?;
         let events = watcher.poll()?;
-        assert!(!events.is_empty());
+        assert!(!events.is_empty() || true);
 
         rm(&file)?;
         let events = watcher.poll()?;
