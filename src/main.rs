@@ -25,9 +25,7 @@ fn main() -> qshr::Result<()> {
     rm(&temp)?;
 
     println!("First few files rooted here:");
-    let files: Vec<_> = walk_files(".")?
-        .take(3)
-        .collect::<qshr::Result<Vec<_>>>()?;
+    let files: Vec<_> = walk_files(".")?.take(3).collect::<qshr::Result<Vec<_>>>()?;
     for entry in &files {
         println!(" * {}", entry.path.display());
     }

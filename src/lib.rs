@@ -27,6 +27,18 @@ pub use fs::{
 pub use fs::{watch_async, watch_async_stream, watch_filtered_async};
 pub use shell::Shell;
 
+/// Convenience macro for writing quick shell-style scripts.
+#[macro_export]
+macro_rules! qshr {
+    ($($body:tt)*) => {{
+        use $crate::prelude::*;
+        let __qshr_entry = || -> $crate::Result<()> {
+            $($body)*
+        };
+        __qshr_entry()
+    }};
+}
+
 /// Convenience module with the most frequently used items.
 ///
 /// ```no_run
@@ -39,7 +51,7 @@ pub use shell::Shell;
 ///
 ///     let lines = cmd("cargo").arg("--version").lines()?;
 ///     for line in lines {
-///         println!("cargo: {line}");
+///         println!("cargo: {}", line?);
 ///     }
 ///
 ///     Ok(())
@@ -54,5 +66,14 @@ mod tests {
     fn shell_basic_map() {
         let mapped: Vec<_> = Shell::from_iter([1, 2, 3]).map(|n| n * n).collect();
         assert_eq!(mapped, vec![1, 4, 9]);
+    }
+
+    #[test]
+    fn macro_runs_script() -> Result<()> {
+        qshr! {
+            let output = sh("echo macro works").read()?;
+            assert!(output.contains("macro"));
+            Ok(())
+        }
     }
 }

@@ -18,9 +18,9 @@ use tokio::{sync::mpsc as async_mpsc, task};
 #[cfg(feature = "async")]
 use tokio_stream::wrappers::ReceiverStream;
 
-use glob::{glob as glob_iter, Pattern};
-use notify::{self, event::RemoveKind, Event, EventKind, RecommendedWatcher, RecursiveMode};
+use glob::{Pattern, glob as glob_iter};
 use notify::Watcher as _;
+use notify::{self, Event, EventKind, RecommendedWatcher, RecursiveMode, event::RemoveKind};
 
 /// Metadata about a filesystem path captured during listing operations.
 #[derive(Debug, Clone)]
@@ -80,7 +80,9 @@ pub fn ls_detailed(path: impl AsRef<Path>) -> Result<Shell<Result<PathEntry>>> {
 
 /// Recursively walks the directory tree depth-first including the root.
 pub fn walk(root: impl AsRef<Path>) -> Result<Shell<Result<PathBuf>>> {
-    Ok(Shell::new(Box::new(WalkIter::new(root.as_ref().to_path_buf()))))
+    Ok(Shell::new(Box::new(WalkIter::new(
+        root.as_ref().to_path_buf(),
+    ))))
 }
 
 /// Recursively walks the directory tree, including metadata for each entry.
@@ -191,8 +193,8 @@ pub fn copy_dir(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
     let from = from.as_ref();
     let to = to.as_ref();
     mkdir_all(to)?;
-    let mut walker = walk(from)?;
-    while let Some(path) = walker.next() {
+    let walker = walk(from)?;
+    for path in walker {
         let path = path?;
         let relative = path.strip_prefix(from).unwrap_or(&path);
         if relative.as_os_str().is_empty() {
@@ -296,7 +298,10 @@ impl Watcher {
             let _ = tx.send(res);
         })?;
         watcher.watch(&root, RecursiveMode::Recursive)?;
-        Ok(Self { _inner: watcher, rx })
+        Ok(Self {
+            _inner: watcher,
+            rx,
+        })
     }
 
     /// Converts this watcher into a [`Shell`] that yields events as they occur.
@@ -338,8 +343,7 @@ impl Iterator for WatcherIter {
                     if converted.is_empty() {
                         continue;
                     }
-                    self.pending
-                        .extend(converted.into_iter().map(Result::Ok));
+                    self.pending.extend(converted.into_iter().map(Result::Ok));
                 }
                 Ok(Err(err)) => return Some(Err(err.into())),
                 Err(_) => return None,
@@ -371,35 +375,30 @@ pub fn debounce_watch(
     window: Duration,
 ) -> Shell<Result<WatchEvent>> {
     let mut last_emitted: Option<(PathBuf, SystemTime)> = None;
-    events.filter_map(move |event| {
-        match event {
-            Ok(event) => {
-                let (path, timestamp) = match &event {
-                    WatchEvent::Created(entry) | WatchEvent::Modified(entry) => (
-                        entry.path.clone(),
-                        entry.modified().unwrap_or_else(SystemTime::now),
-                    ),
-                    WatchEvent::Removed { path, .. } => (path.clone(), SystemTime::now()),
-                };
-                let should_emit = match &last_emitted {
-                    Some((last_path, last_time)) => {
-                        last_path != &path
-                            || timestamp
-                                .duration_since(*last_time)
-                                .unwrap_or_default()
-                                >= window
-                    }
-                    None => true,
-                };
-                if should_emit {
-                    last_emitted = Some((path, timestamp));
-                    Some(Ok(event))
-                } else {
-                    None
+    events.filter_map(move |event| match event {
+        Ok(event) => {
+            let (path, timestamp) = match &event {
+                WatchEvent::Created(entry) | WatchEvent::Modified(entry) => (
+                    entry.path.clone(),
+                    entry.modified().unwrap_or_else(SystemTime::now),
+                ),
+                WatchEvent::Removed { path, .. } => (path.clone(), SystemTime::now()),
+            };
+            let should_emit = match &last_emitted {
+                Some((last_path, last_time)) => {
+                    last_path != &path
+                        || timestamp.duration_since(*last_time).unwrap_or_default() >= window
                 }
+                None => true,
+            };
+            if should_emit {
+                last_emitted = Some((path, timestamp));
+                Some(Ok(event))
+            } else {
+                None
             }
-            Err(err) => Some(Err(err)),
         }
+        Err(err) => Some(Err(err)),
     })
 }
 
@@ -700,7 +699,9 @@ impl Iterator for CatIter {
 /// Expands filesystem globs (e.g. `*.rs`) into a stream of paths.
 pub fn glob(pattern: impl AsRef<str>) -> Result<Shell<Result<PathBuf>>> {
     let iter = glob_iter(pattern.as_ref())?;
-    Ok(Shell::new(Box::new(iter.map(|entry| entry.map_err(Into::into)))))
+    Ok(Shell::new(Box::new(
+        iter.map(|entry| entry.map_err(Into::into)),
+    )))
 }
 
 /// Expands globs while returning [`PathEntry`] metadata.
@@ -730,10 +731,7 @@ pub fn filter_extension(
 }
 
 /// Keeps entries at or above the specified size (in bytes).
-pub fn filter_size(
-    entries: Shell<Result<PathEntry>>,
-    min_bytes: u64,
-) -> Shell<Result<PathEntry>> {
+pub fn filter_size(entries: Shell<Result<PathEntry>>, min_bytes: u64) -> Shell<Result<PathEntry>> {
     entries.filter_map(move |entry| match entry {
         Ok(entry) => (entry.size() >= min_bytes).then_some(Ok(entry)),
         Err(err) => Some(Err(err)),
@@ -794,8 +792,7 @@ mod tests {
         let dir = tempdir()?;
         let file = dir.path().join("sample.txt");
         write_lines(&file, ["first", "second"])?;
-        let lines = read_lines(&file)?
-            .collect::<crate::Result<Vec<_>>>()?;
+        let lines = read_lines(&file)?.collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
         Ok(())
     }
@@ -820,15 +817,13 @@ mod tests {
             .join("*.txt")
             .to_string_lossy()
             .to_string();
-        let mut matches = glob(&pattern)?
-            .collect::<crate::Result<Vec<_>>>()?;
+        let mut matches = glob(&pattern)?.collect::<crate::Result<Vec<_>>>()?;
         matches.sort();
         assert!(matches.contains(&file_a));
         assert!(matches.contains(&file_b));
         assert!(matches.contains(&orphan));
 
-        let cat_lines = cat([&file_a, &file_b])?
-            .collect::<crate::Result<Vec<_>>>()?;
+        let cat_lines = cat([&file_a, &file_b])?.collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(cat_lines.len(), 3);
 
         rm(&orphan)?;
@@ -850,12 +845,10 @@ mod tests {
         let file = dir.path().join("entry.txt");
         write_text(&file, "data")?;
 
-        let detailed: Vec<_> = ls_detailed(dir.path())?
-            .collect::<crate::Result<Vec<_>>>()?;
+        let detailed: Vec<_> = ls_detailed(dir.path())?.collect::<crate::Result<Vec<_>>>()?;
         assert!(detailed.iter().any(|entry| entry.path == file));
 
-        let walk_entries: Vec<_> = walk_detailed(dir.path())?
-            .collect::<crate::Result<Vec<_>>>()?;
+        let walk_entries: Vec<_> = walk_detailed(dir.path())?.collect::<crate::Result<Vec<_>>>()?;
         assert!(walk_entries.iter().any(|entry| entry.path == file));
         Ok(())
     }
@@ -878,8 +871,7 @@ mod tests {
         assert!(move_target.exists());
         assert!(!copy_target.exists());
 
-        let files: Vec<_> = walk_files(&move_target)?
-            .collect::<crate::Result<Vec<_>>>()?;
+        let files: Vec<_> = walk_files(&move_target)?.collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_name().unwrap().to_string_lossy(), "data.txt");
 
@@ -893,11 +885,9 @@ mod tests {
         .collect::<crate::Result<Vec<_>>>()?;
         assert!(!globbed.is_empty());
 
-        let filtered: Vec<_> = filter_extension(
-            Shell::from_iter(globbed.clone().into_iter().map(Ok)),
-            "txt",
-        )
-        .collect::<crate::Result<Vec<_>>>()?;
+        let filtered: Vec<_> =
+            filter_extension(Shell::from_iter(globbed.clone().into_iter().map(Ok)), "txt")
+                .collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(filtered.len(), globbed.len());
 
         let filtered_size: Vec<_> =

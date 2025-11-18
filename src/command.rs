@@ -130,10 +130,10 @@ impl Command {
         command.stdout(Stdio::inherit());
         command.stderr(Stdio::inherit());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(input)?;
-            }
+        if let Some(input) = &self.stdin
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            stdin.write_all(input)?;
         }
         let status = child.wait()?;
         if status.success() {
@@ -149,7 +149,7 @@ impl Command {
 
     /// Returns the command stdout decoded as UTF-8 text.
     pub fn read(&self) -> Result<String> {
-        Ok(self.output()?.stdout_string()?)
+        self.output()?.stdout_string()
     }
 
     /// Returns stdout split by lines into a [`Shell`].
@@ -168,23 +168,19 @@ impl Command {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(input)?;
-            }
+        if let Some(input) = &self.stdin
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            stdin.write_all(input)?;
         }
-        let stdout = child.stdout.take().ok_or_else(|| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "missing stdout pipe",
-            ))
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "missing stderr pipe",
-            ))
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Io(std::io::Error::other("missing stdout pipe")))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| Error::Io(std::io::Error::other("missing stderr pipe")))?;
         let (tx, rx) = mpsc::channel();
         let program = self.program.clone();
         thread::spawn(move || {
@@ -220,10 +216,7 @@ impl Command {
                     }
                 }
             }
-            let stdout_output = match stdout_handle.join() {
-                Ok(buf) => buf,
-                Err(_) => String::new(),
-            };
+            let stdout_output = stdout_handle.join().unwrap_or_default();
             match child.wait() {
                 Ok(status) => {
                     if !status.success() {
@@ -278,10 +271,10 @@ impl Command {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(input).await?;
-            }
+        if let Some(input) = &self.stdin
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            stdin.write_all(input).await?;
         }
         let output = child.wait_with_output().await?;
         if !output.status.success() {
@@ -307,7 +300,7 @@ impl Command {
     /// Reads stdout asynchronously as UTF-8 text.
     #[cfg(feature = "async")]
     pub async fn read_async(&self) -> Result<String> {
-        Ok(self.output_async().await?.stdout_string()?)
+        self.output_async().await?.stdout_string()
     }
 
     /// Creates a [`Pipeline`] with another command.
@@ -324,23 +317,19 @@ impl Command {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(input)?;
-            }
+        if let Some(input) = &self.stdin
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            stdin.write_all(input)?;
         }
-        let stdout = child.stdout.take().ok_or_else(|| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "missing stdout pipe",
-            ))
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "missing stderr pipe",
-            ))
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Io(std::io::Error::other("missing stdout pipe")))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| Error::Io(std::io::Error::other("missing stderr pipe")))?;
         let (tx, rx) = mpsc::channel();
         let program = self.program.clone();
         thread::spawn(move || {
@@ -376,10 +365,7 @@ impl Command {
                     }
                 }
             }
-            let stderr_output = match stderr_handle.join() {
-                Ok(buf) => buf,
-                Err(_) => String::new(),
-            };
+            let stderr_output = stderr_handle.join().unwrap_or_default();
             match child.wait() {
                 Ok(status) => {
                     if !status.success() {
@@ -408,10 +394,9 @@ impl Command {
         })
         .await
         .map_err(|err| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream task panicked: {err}"),
-            ))
+            Error::Io(std::io::Error::other(format!(
+                "stream task panicked: {err}"
+            )))
         })??;
         Ok(Shell::from_iter(lines))
     }
@@ -421,10 +406,10 @@ impl Command {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(input)?;
-            }
+        if let Some(input) = &self.stdin
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            stdin.write_all(input)?;
         }
         Ok(child.wait_with_output()?)
     }
@@ -536,16 +521,11 @@ impl Pipeline {
             input = Some(output.stdout.clone());
             last = Some(output);
         }
-        last.ok_or_else(|| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "empty pipeline",
-            ))
-        })
+        last.ok_or_else(|| Error::Io(std::io::Error::other("empty pipeline")))
     }
 
     pub fn read(&self) -> Result<String> {
-        Ok(self.output()?.stdout_string()?)
+        self.output()?.stdout_string()
     }
 
     pub fn lines(&self) -> Result<Shell<String>> {
@@ -589,10 +569,7 @@ impl Pipeline {
     /// Streams stdout of the final pipeline stage line-by-line.
     pub fn stream_lines(&self) -> Result<Shell<Result<String>>> {
         if self.stages.is_empty() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "empty pipeline",
-            )));
+            return Err(Error::Io(std::io::Error::other("empty pipeline")));
         }
         let mut input: Option<Vec<u8>> = None;
         for (idx, stage) in self.stages.iter().enumerate() {
@@ -613,10 +590,7 @@ impl Pipeline {
     /// Streams stderr of the final pipeline stage line-by-line.
     pub fn stream_stderr(&self) -> Result<Shell<Result<String>>> {
         if self.stages.is_empty() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "empty pipeline",
-            )));
+            return Err(Error::Io(std::io::Error::other("empty pipeline")));
         }
         let mut input: Option<Vec<u8>> = None;
         for (idx, stage) in self.stages.iter().enumerate() {
@@ -644,10 +618,9 @@ impl Pipeline {
         })
         .await
         .map_err(|err| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("pipeline stream task panicked: {err}"),
-            ))
+            Error::Io(std::io::Error::other(format!(
+                "pipeline stream task panicked: {err}"
+            )))
         })??;
         Ok(Shell::from_iter(lines))
     }

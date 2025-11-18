@@ -1,9 +1,9 @@
 #[cfg(feature = "async")]
 use qshr::prelude::*;
 #[cfg(feature = "async")]
-use tokio_stream::StreamExt;
-#[cfg(feature = "async")]
 use std::time::Duration;
+#[cfg(feature = "async")]
+use tokio_stream::StreamExt;
 
 #[cfg(feature = "async")]
 #[tokio::main]

@@ -23,15 +23,6 @@ impl<T> Shell<T> {
         }
     }
 
-    /// Converts any iterable type into a `Shell`.
-    pub fn from_iter<I>(iterable: I) -> Self
-    where
-        I: IntoIterator<Item = T>,
-        I::IntoIter: Iterator<Item = T> + 'static,
-    {
-        Self::new(iterable.into_iter())
-    }
-
     /// An empty stream.
     pub fn empty() -> Self
     where
@@ -260,19 +251,19 @@ impl<T> Shell<T> {
     }
 
     /// Folds the stream left-to-right.
-    pub fn fold<U, F>(mut self, mut acc: U, mut f: F) -> U
+    pub fn fold<U, F>(self, mut acc: U, mut f: F) -> U
     where
         F: FnMut(U, T) -> U,
     {
-        while let Some(item) = self.next() {
+        for item in self {
             acc = f(acc, item);
         }
         acc
     }
 
     /// Applies a callback to every value, primarily for side effects.
-    pub fn for_each(mut self, mut f: impl FnMut(T)) {
-        while let Some(item) = self.next() {
+    pub fn for_each(self, mut f: impl FnMut(T)) {
+        for item in self {
             f(item);
         }
     }
@@ -300,7 +291,7 @@ impl<T> Shell<T> {
     ///
     /// This placeholder implementation processes chunks sequentially but exposes
     /// the shape needed to plug in parallelism in the future.
-    pub fn chunk_map<F, U>(self, chunk_size: usize, mut f: F) -> Shell<U>
+    pub fn chunk_map<F, U>(self, chunk_size: usize, f: F) -> Shell<U>
     where
         F: FnMut(Vec<T>) -> Vec<U> + Send + 'static,
         U: 'static + Send,
@@ -308,7 +299,7 @@ impl<T> Shell<T> {
     {
         assert!(chunk_size > 0, "chunk size must be greater than zero");
         let iter = self.into_boxed();
-        Shell::new(ChunkMapIter::new(iter, chunk_size, move |chunk| f(chunk)))
+        Shell::new(ChunkMapIter::new(iter, chunk_size, f))
     }
 
     /// Applies a function to chunks in parallel when the `parallel` feature is enabled.
@@ -351,6 +342,13 @@ where
 {
     fn default() -> Self {
         Shell::empty()
+    }
+}
+
+impl<T: 'static> std::iter::FromIterator<T> for Shell<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iterable: I) -> Self {
+        let data: Vec<T> = iterable.into_iter().collect();
+        Shell::new(data.into_iter())
     }
 }
 
@@ -445,15 +443,13 @@ impl<T> Iterator for InterleaveIter<T> {
                 return Some(item);
             }
         }
-        loop {
-            if let Some(item) = self.a.next() {
-                return Some(item);
-            }
-            if let Some(item) = self.b.next() {
-                return Some(item);
-            }
-            return None;
+        if let Some(item) = self.a.next() {
+            return Some(item);
         }
+        if let Some(item) = self.b.next() {
+            return Some(item);
+        }
+        None
     }
 }
 
@@ -606,12 +602,9 @@ where
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(item) = self.iter.next() {
-            if self.seen.insert(item.clone()) {
-                return Some(item);
-            }
-        }
-        None
+        self.iter
+            .by_ref()
+            .find(|item| self.seen.insert(item.clone()))
     }
 }
 struct ChunkMapIter<T, U, F>
