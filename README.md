@@ -220,6 +220,8 @@ if let Ok(event) = rx.try_recv() {
 }
 ```
 
+When you need to reuse glob metadata multiple times (copy/move operations, filtering), resolve once via `GlobCache::new("src/**/*.rs")` and call `.entries()` to avoid repeated `fs::metadata` calls.
+
 ## Features
 
 - `parallel`: enables `Shell::chunk_map_parallel` via `rayon`.
