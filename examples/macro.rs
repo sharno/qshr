@@ -3,10 +3,11 @@ use qshr::qshr;
 fn main() -> qshr::Result<()> {
     qshr! {
         println!("== macro powered script ==");
-        sh("echo hello via macro").run()?;
+        "echo hello via macro";
 
         let rustc = cmd("rustc").arg("--version").read()?;
         println!("rustc -> {}", rustc.trim());
-        Ok(())
+
+        "echo piping through more" | "more";
     }
 }

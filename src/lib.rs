@@ -33,9 +33,55 @@ macro_rules! qshr {
     ($($body:tt)*) => {{
         use $crate::prelude::*;
         let __qshr_entry = || -> $crate::Result<()> {
-            $($body)*
+            $crate::__qshr_execute! { $($body)* }
         };
         __qshr_entry()
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __qshr_build_pipeline {
+    ($cmd:literal) => {
+        $crate::sh($cmd)
+    };
+    ($cmd:literal | $($rest:tt)+) => {{
+        $crate::sh($cmd).pipe($crate::__qshr_build_pipeline!($($rest)+))
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __qshr_execute {
+    () => {
+        Ok(())
+    };
+    ($first:literal $(| $next:literal)+ ; $($rest:tt)*) => {{
+        $crate::__qshr_build_pipeline!($first $(| $next)+).run()?;
+        $crate::__qshr_execute! { $($rest)* }
+    }};
+    ($first:literal $(| $next:literal)+) => {{
+        $crate::__qshr_build_pipeline!($first $(| $next)+).run()?;
+        Ok(())
+    }};
+    ($cmd:literal ; $($rest:tt)*) => {{
+        $crate::sh($cmd).run()?;
+        $crate::__qshr_execute! { $($rest)* }
+    }};
+    ($cmd:literal) => {{
+        $crate::sh($cmd).run()?;
+        Ok(())
+    }};
+    ($stmt:stmt ; $($rest:tt)*) => {{
+        $stmt
+        $crate::__qshr_execute! { $($rest)* }
+    }};
+    ($stmt:stmt) => {{
+        $stmt
+        Ok(())
+    }};
+    ($expr:expr) => {{
+        $expr
     }};
 }
 
@@ -71,9 +117,11 @@ mod tests {
     #[test]
     fn macro_runs_script() -> Result<()> {
         qshr! {
-            let output = sh("echo macro works").read()?;
-            assert!(output.contains("macro"));
-            Ok(())
-        }
+            "echo macro works";
+            let output = cmd("rustc").arg("--version").read()?;
+            assert!(output.contains("rustc"));
+            "echo macro works" | "more";
+        }?;
+        Ok(())
     }
 }
