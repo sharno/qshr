@@ -6,7 +6,7 @@ fn main() -> qshr::Result<()> {
 
     let large_rs = filter_size(filter_extension(entries, "rs"), 1)
         .take(5)
-        .collect::<Vec<_>>();
+        .collect::<qshr::Result<Vec<_>>>()?;
 
     println!("First {} Rust files (>=1 byte):", large_rs.len());
     for entry in large_rs {

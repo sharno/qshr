@@ -3,7 +3,7 @@ use qshr::prelude::*;
 fn main() -> qshr::Result<()> {
     println!("Listing current directory:");
     for path in ls(".")?.take(5) {
-        println!(" - {}", path.display());
+        println!(" - {}", path?.display());
     }
 
     if let Some(home) = home_dir() {
@@ -25,7 +25,9 @@ fn main() -> qshr::Result<()> {
     rm(&temp)?;
 
     println!("First few files rooted here:");
-    let files: Vec<_> = walk_files(".")?.take(3).collect();
+    let files: Vec<_> = walk_files(".")?
+        .take(3)
+        .collect::<qshr::Result<Vec<_>>>()?;
     for entry in &files {
         println!(" * {}", entry.path.display());
     }
@@ -35,7 +37,7 @@ fn main() -> qshr::Result<()> {
         let mirror_dir = mirror.with_extension("dir");
         mkdir_all(&mirror_dir)?;
         copy_entries(
-            Shell::from_iter(files.clone()),
+            Shell::from_iter(files.clone().into_iter().map(Ok)),
             std::path::Path::new("."),
             &mirror_dir,
         )?;

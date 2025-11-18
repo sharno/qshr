@@ -30,6 +30,7 @@ use qshr::prelude::*;
 fn main() -> qshr::Result<()> {
     let rust_sources = filter_extension(glob_entries("src/**/*.rs")?, "rs");
     for entry in rust_sources.take(3) {
+        let entry = entry?;
         println!("{}", entry.path.display());
     }
     Ok(())

@@ -7,6 +7,7 @@ fn main() -> qshr::Result<()> {
 
     println!("== listing *.rs in src ==");
     for entry in glob_entries("src/*.rs")? {
+        let entry = entry?;
         println!("- {}", entry.path.display());
     }
 

@@ -1,7 +1,7 @@
 use std::{
     collections::{HashSet, VecDeque},
     iter,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// A lazy, composable stream of values inspired by Turtle's `Shell`.
@@ -620,7 +620,7 @@ where
 {
     iter: Box<dyn Iterator<Item = T> + 'static>,
     size: usize,
-    mapper: Mutex<F>,
+    mapper: F,
     buffer: Vec<U>,
 }
 
@@ -632,7 +632,7 @@ where
         Self {
             iter,
             size,
-            mapper: Mutex::new(mapper),
+            mapper,
             buffer: Vec::new(),
         }
     }
@@ -659,8 +659,7 @@ where
         if chunk.is_empty() {
             return None;
         }
-        let mut mapper = self.mapper.lock().unwrap();
-        let mut mapped = (mapper)(chunk);
+        let mut mapped = (self.mapper)(chunk);
         mapped.reverse();
         self.buffer = mapped;
         self.buffer.pop()
