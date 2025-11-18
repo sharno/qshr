@@ -18,7 +18,7 @@ fn main() -> qshr::Result<()> {
             WatchEvent::Modified(entry) => {
                 println!("Modified {}", entry.path.display());
             }
-            WatchEvent::Removed(path) => {
+            WatchEvent::Removed { path, .. } => {
                 println!("Removed {}", path.display());
             }
         }

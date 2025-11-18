@@ -1,4 +1,4 @@
-use crate::{Result, Shell};
+use crate::{Error, Result, Shell};
 
 use std::{
     collections::VecDeque,
@@ -19,7 +19,7 @@ use tokio::{sync::mpsc as async_mpsc, task};
 use tokio_stream::wrappers::ReceiverStream;
 
 use glob::{glob as glob_iter, Pattern};
-use notify::{self, Event, EventKind, RecommendedWatcher, RecursiveMode};
+use notify::{self, event::RemoveKind, Event, EventKind, RecommendedWatcher, RecursiveMode};
 use notify::Watcher as _;
 
 /// Metadata about a filesystem path captured during listing operations.
@@ -67,81 +67,47 @@ impl PartialEq for PathEntry {
 impl Eq for PathEntry {}
 
 /// Lists the immediate children of a directory.
-pub fn ls(path: impl AsRef<Path>) -> Result<Shell<PathBuf>> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        entries.push(entry.path());
-    }
-    Ok(Shell::from_iter(entries))
+pub fn ls(path: impl AsRef<Path>) -> Result<Shell<Result<PathBuf>>> {
+    let entries = fs::read_dir(path)?;
+    Ok(Shell::new(Box::new(ReadDirPaths::new(entries))))
 }
 
 /// Lists the immediate children of a directory, including metadata.
-pub fn ls_detailed(path: impl AsRef<Path>) -> Result<Shell<PathEntry>> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        entries.push(PathEntry {
-            path: entry.path(),
-            metadata,
-        });
-    }
-    Ok(Shell::from_iter(entries))
+pub fn ls_detailed(path: impl AsRef<Path>) -> Result<Shell<Result<PathEntry>>> {
+    let entries = fs::read_dir(path)?;
+    Ok(Shell::new(Box::new(ReadDirDetailed::new(entries))))
 }
 
 /// Recursively walks the directory tree depth-first including the root.
-pub fn walk(root: impl AsRef<Path>) -> Result<Shell<PathBuf>> {
-    let mut stack = vec![root.as_ref().to_path_buf()];
-    let mut acc = Vec::new();
-
-    while let Some(path) = stack.pop() {
-        acc.push(path.clone());
-        if path.is_dir() {
-            for entry in fs::read_dir(&path)? {
-                let entry = entry?;
-                stack.push(entry.path());
-            }
-        }
-    }
-
-    Ok(Shell::from_iter(acc))
+pub fn walk(root: impl AsRef<Path>) -> Result<Shell<Result<PathBuf>>> {
+    Ok(Shell::new(Box::new(WalkIter::new(root.as_ref().to_path_buf()))))
 }
 
 /// Recursively walks the directory tree, including metadata for each entry.
-pub fn walk_detailed(root: impl AsRef<Path>) -> Result<Shell<PathEntry>> {
-    let mut stack = vec![root.as_ref().to_path_buf()];
-    let mut acc = Vec::new();
-
-    while let Some(path) = stack.pop() {
-        let metadata = fs::metadata(&path)?;
-        let is_dir = metadata.is_dir();
-        acc.push(PathEntry {
-            path: path.clone(),
-            metadata,
-        });
-        if is_dir {
-            for entry in fs::read_dir(&path)? {
-                let entry = entry?;
-                stack.push(entry.path());
-            }
-        }
-    }
-
-    Ok(Shell::from_iter(acc))
+pub fn walk_detailed(root: impl AsRef<Path>) -> Result<Shell<Result<PathEntry>>> {
+    Ok(Shell::new(Box::new(WalkDetailedIter::new(
+        root.as_ref().to_path_buf(),
+    ))))
 }
 
 /// Walks the tree and yields only file entries.
-pub fn walk_files(root: impl AsRef<Path>) -> Result<Shell<PathEntry>> {
-    Ok(walk_detailed(root)?.filter(|entry| entry.is_file()))
+pub fn walk_files(root: impl AsRef<Path>) -> Result<Shell<Result<PathEntry>>> {
+    Ok(walk_detailed(root)?.filter_map(|entry| match entry {
+        Ok(entry) if entry.is_file() => Some(Ok(entry)),
+        Ok(_) => None,
+        Err(err) => Some(Err(err)),
+    }))
 }
 
 /// Walks the tree and keeps entries matching the predicate.
-pub fn walk_filter<F>(root: impl AsRef<Path>, predicate: F) -> Result<Shell<PathEntry>>
+pub fn walk_filter<F>(root: impl AsRef<Path>, mut predicate: F) -> Result<Shell<Result<PathEntry>>>
 where
     F: FnMut(&PathEntry) -> bool + 'static,
 {
-    Ok(walk_detailed(root)?.filter(predicate))
+    Ok(walk_detailed(root)?.filter_map(move |entry| match entry {
+        Ok(entry) => predicate(&entry).then_some(Ok(entry)),
+        Err(err) => Some(Err(err)),
+    }))
 }
 
 /// Reads a UTF-8 file completely into a `String`.
@@ -150,14 +116,12 @@ pub fn read_text(path: impl AsRef<Path>) -> Result<String> {
 }
 
 /// Reads a file as a stream of lines.
-pub fn read_lines(path: impl AsRef<Path>) -> Result<Shell<String>> {
+pub fn read_lines(path: impl AsRef<Path>) -> Result<Shell<Result<String>>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut lines = Vec::new();
-    for line in reader.lines() {
-        lines.push(line?);
-    }
-    Ok(Shell::from_iter(lines))
+    Ok(Shell::new(Box::new(
+        reader.lines().map(|line| line.map_err(Into::into)),
+    )))
 }
 
 /// Writes the provided text to the path (truncating existing file).
@@ -193,19 +157,16 @@ pub fn append_text(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result
 }
 
 /// Concatenates multiple files line-by-line.
-pub fn cat<P, I>(paths: I) -> Result<Shell<String>>
+pub fn cat<P, I>(paths: I) -> Result<Shell<Result<String>>>
 where
     P: AsRef<Path>,
     I: IntoIterator<Item = P>,
 {
-    let mut out = Vec::new();
-    for path in paths {
-        let file = File::open(path.as_ref())?;
-        for line in BufReader::new(file).lines() {
-            out.push(line?);
-        }
-    }
-    Ok(Shell::from_iter(out))
+    let files = paths
+        .into_iter()
+        .map(|path| path.as_ref().to_path_buf())
+        .collect::<Vec<_>>();
+    Ok(Shell::new(Box::new(CatIter::new(files))))
 }
 
 /// Creates a directory and all missing parents.
@@ -232,6 +193,7 @@ pub fn copy_dir(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
     mkdir_all(to)?;
     let mut walker = walk(from)?;
     while let Some(path) = walker.next() {
+        let path = path?;
         let relative = path.strip_prefix(from).unwrap_or(&path);
         if relative.as_os_str().is_empty() {
             continue;
@@ -273,13 +235,14 @@ pub fn move_path(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
 
 /// Copies files yielded by `entries` into `destination`, preserving relative paths.
 pub fn copy_entries(
-    entries: Shell<PathEntry>,
+    entries: Shell<Result<PathEntry>>,
     root: impl AsRef<Path>,
     destination: impl AsRef<Path>,
 ) -> Result<()> {
     let root = root.as_ref();
     let destination = destination.as_ref();
     for entry in entries {
+        let entry = entry?;
         let relative = entry.path.strip_prefix(root).unwrap_or(&entry.path);
         let target = destination.join(relative);
         if entry.is_dir() {
@@ -299,21 +262,21 @@ pub fn copy_entries(
 pub enum WatchEvent {
     Created(PathEntry),
     Modified(PathEntry),
-    Removed(PathBuf),
+    Removed { path: PathBuf, was_dir: bool },
 }
 
 impl WatchEvent {
     pub fn path(&self) -> &Path {
         match self {
             WatchEvent::Created(entry) | WatchEvent::Modified(entry) => &entry.path,
-            WatchEvent::Removed(path) => path,
+            WatchEvent::Removed { path, .. } => path,
         }
     }
 
     pub fn is_dir(&self) -> bool {
         match self {
             WatchEvent::Created(entry) | WatchEvent::Modified(entry) => entry.is_dir(),
-            WatchEvent::Removed(path) => path.is_dir(),
+            WatchEvent::Removed { was_dir, .. } => *was_dir,
         }
     }
 }
@@ -416,7 +379,7 @@ pub fn debounce_watch(
                         entry.path.clone(),
                         entry.modified().unwrap_or_else(SystemTime::now),
                     ),
-                    WatchEvent::Removed(path) => (path.clone(), SystemTime::now()),
+                    WatchEvent::Removed { path, .. } => (path.clone(), SystemTime::now()),
                 };
                 let should_emit = match &last_emitted {
                     Some((last_path, last_time)) => {
@@ -512,7 +475,7 @@ pub async fn watch_filtered_async(
 fn convert_event(event: Event) -> Vec<WatchEvent> {
     let mut out = Vec::new();
     for path in event.paths {
-        match event.kind {
+        match &event.kind {
             EventKind::Create(_) => {
                 if let Some(entry) = path_entry_for(&path) {
                     out.push(WatchEvent::Created(entry));
@@ -523,8 +486,9 @@ fn convert_event(event: Event) -> Vec<WatchEvent> {
                     out.push(WatchEvent::Modified(entry));
                 }
             }
-            EventKind::Remove(_) => {
-                out.push(WatchEvent::Removed(path));
+            EventKind::Remove(kind) => {
+                let was_dir = matches!(kind, RemoveKind::Folder | RemoveKind::Any);
+                out.push(WatchEvent::Removed { path, was_dir });
             }
             _ => {}
         }
@@ -539,45 +503,256 @@ fn path_entry_for(path: &Path) -> Option<PathEntry> {
     })
 }
 
-/// Expands filesystem globs (e.g. `*.rs`) into a stream of paths.
-pub fn glob(pattern: impl AsRef<str>) -> Result<Shell<PathBuf>> {
-    let mut matches = Vec::new();
-    for entry in glob_iter(pattern.as_ref())? {
-        matches.push(entry?);
+struct ReadDirPaths {
+    inner: fs::ReadDir,
+}
+
+impl ReadDirPaths {
+    fn new(inner: fs::ReadDir) -> Self {
+        Self { inner }
     }
-    Ok(Shell::from_iter(matches))
+}
+
+impl Iterator for ReadDirPaths {
+    type Item = Result<PathBuf>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|entry| entry.map(|entry| entry.path()).map_err(Into::into))
+    }
+}
+
+struct ReadDirDetailed {
+    inner: fs::ReadDir,
+}
+
+impl ReadDirDetailed {
+    fn new(inner: fs::ReadDir) -> Self {
+        Self { inner }
+    }
+}
+
+impl Iterator for ReadDirDetailed {
+    type Item = Result<PathEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|entry| {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            Ok(PathEntry {
+                path: entry.path(),
+                metadata,
+            })
+        })
+    }
+}
+
+struct WalkIter {
+    stack: Vec<PathBuf>,
+    pending_err: Option<Error>,
+}
+
+impl WalkIter {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            stack: vec![root],
+            pending_err: None,
+        }
+    }
+}
+
+impl Iterator for WalkIter {
+    type Item = Result<PathBuf>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(err) = self.pending_err.take() {
+            return Some(Err(err));
+        }
+        let path = self.stack.pop()?;
+        if path.is_dir() {
+            match fs::read_dir(&path) {
+                Ok(read_dir) => {
+                    for entry in read_dir {
+                        match entry {
+                            Ok(entry) => self.stack.push(entry.path()),
+                            Err(err) => {
+                                self.pending_err = Some(err.into());
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.pending_err = Some(err.into());
+                }
+            }
+        }
+        Some(Ok(path))
+    }
+}
+
+struct WalkDetailedIter {
+    stack: Vec<PathBuf>,
+    pending_err: Option<Error>,
+}
+
+impl WalkDetailedIter {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            stack: vec![root],
+            pending_err: None,
+        }
+    }
+}
+
+impl Iterator for WalkDetailedIter {
+    type Item = Result<PathEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(err) = self.pending_err.take() {
+            return Some(Err(err));
+        }
+        let path = self.stack.pop()?;
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => return Some(Err(err.into())),
+        };
+        if metadata.is_dir() {
+            match fs::read_dir(&path) {
+                Ok(read_dir) => {
+                    for entry in read_dir {
+                        match entry {
+                            Ok(entry) => self.stack.push(entry.path()),
+                            Err(err) => {
+                                self.pending_err = Some(err.into());
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.pending_err = Some(err.into());
+                }
+            }
+        }
+        Some(Ok(PathEntry { path, metadata }))
+    }
+}
+
+struct CatIter {
+    files: Vec<PathBuf>,
+    idx: usize,
+    current: Option<io::Lines<BufReader<File>>>,
+}
+
+impl CatIter {
+    fn new(files: Vec<PathBuf>) -> Self {
+        Self {
+            files,
+            idx: 0,
+            current: None,
+        }
+    }
+
+    fn advance_reader(&mut self) -> Option<Result<()>> {
+        if self.idx >= self.files.len() {
+            return None;
+        }
+        let path = &self.files[self.idx];
+        self.idx += 1;
+        match File::open(path) {
+            Ok(file) => {
+                self.current = Some(BufReader::new(file).lines());
+                Some(Ok(()))
+            }
+            Err(err) => Some(Err(err.into())),
+        }
+    }
+}
+
+impl Iterator for CatIter {
+    type Item = Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(lines) = &mut self.current {
+                match lines.next() {
+                    Some(Ok(line)) => return Some(Ok(line)),
+                    Some(Err(err)) => return Some(Err(err.into())),
+                    None => {
+                        self.current = None;
+                        continue;
+                    }
+                }
+            } else if let Some(result) = self.advance_reader() {
+                match result {
+                    Ok(()) => continue,
+                    Err(err) => return Some(Err(err)),
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+}
+
+/// Expands filesystem globs (e.g. `*.rs`) into a stream of paths.
+pub fn glob(pattern: impl AsRef<str>) -> Result<Shell<Result<PathBuf>>> {
+    let iter = glob_iter(pattern.as_ref())?;
+    Ok(Shell::new(Box::new(iter.map(|entry| entry.map_err(Into::into)))))
 }
 
 /// Expands globs while returning [`PathEntry`] metadata.
-pub fn glob_entries(pattern: impl AsRef<str>) -> Result<Shell<PathEntry>> {
-    let mut matches = Vec::new();
-    for entry in glob_iter(pattern.as_ref())? {
+pub fn glob_entries(pattern: impl AsRef<str>) -> Result<Shell<Result<PathEntry>>> {
+    let iter = glob_iter(pattern.as_ref())?;
+    Ok(Shell::new(Box::new(iter.map(|entry| {
         let path = entry?;
         let metadata = fs::metadata(&path)?;
-        matches.push(PathEntry { path, metadata });
-    }
-    Ok(Shell::from_iter(matches))
+        Ok(PathEntry { path, metadata })
+    }))))
 }
 
 /// Filters entries to only those matching the provided extension (case-insensitive).
-pub fn filter_extension(entries: Shell<PathEntry>, ext: impl AsRef<str>) -> Shell<PathEntry> {
+pub fn filter_extension(
+    entries: Shell<Result<PathEntry>>,
+    ext: impl AsRef<str>,
+) -> Shell<Result<PathEntry>> {
     let needle = ext.as_ref().to_ascii_lowercase();
-    entries.filter(move |entry| {
-        entry
+    entries.filter_map(move |entry| match entry {
+        Ok(entry) => entry
             .extension()
             .map(|ext| ext.to_string_lossy().to_ascii_lowercase() == needle)
             .unwrap_or(false)
+            .then_some(Ok(entry)),
+        Err(err) => Some(Err(err)),
     })
 }
 
 /// Keeps entries at or above the specified size (in bytes).
-pub fn filter_size(entries: Shell<PathEntry>, min_bytes: u64) -> Shell<PathEntry> {
-    entries.filter(move |entry| entry.size() >= min_bytes)
+pub fn filter_size(
+    entries: Shell<Result<PathEntry>>,
+    min_bytes: u64,
+) -> Shell<Result<PathEntry>> {
+    entries.filter_map(move |entry| match entry {
+        Ok(entry) => (entry.size() >= min_bytes).then_some(Ok(entry)),
+        Err(err) => Some(Err(err)),
+    })
 }
 
 /// Keeps entries modified at or after `since`.
-pub fn filter_modified_since(entries: Shell<PathEntry>, since: SystemTime) -> Shell<PathEntry> {
-    entries.filter(move |entry| entry.modified().map(|time| time >= since).unwrap_or(false))
+pub fn filter_modified_since(
+    entries: Shell<Result<PathEntry>>,
+    since: SystemTime,
+) -> Shell<Result<PathEntry>> {
+    entries.filter_map(move |entry| match entry {
+        Ok(entry) => entry
+            .modified()
+            .map(|time| time >= since)
+            .unwrap_or(false)
+            .then_some(Ok(entry)),
+        Err(err) => Some(Err(err)),
+    })
 }
 
 /// Creates a uniquely named temporary file and returns its path.
@@ -619,7 +794,8 @@ mod tests {
         let dir = tempdir()?;
         let file = dir.path().join("sample.txt");
         write_lines(&file, ["first", "second"])?;
-        let lines = read_lines(&file)?.to_vec();
+        let lines = read_lines(&file)?
+            .collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
         Ok(())
     }
@@ -644,13 +820,15 @@ mod tests {
             .join("*.txt")
             .to_string_lossy()
             .to_string();
-        let mut matches = glob(&pattern)?.to_vec();
+        let mut matches = glob(&pattern)?
+            .collect::<crate::Result<Vec<_>>>()?;
         matches.sort();
         assert!(matches.contains(&file_a));
         assert!(matches.contains(&file_b));
         assert!(matches.contains(&orphan));
 
-        let cat_lines = cat([&file_a, &file_b])?.to_vec();
+        let cat_lines = cat([&file_a, &file_b])?
+            .collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(cat_lines.len(), 3);
 
         rm(&orphan)?;
@@ -672,10 +850,12 @@ mod tests {
         let file = dir.path().join("entry.txt");
         write_text(&file, "data")?;
 
-        let detailed: Vec<_> = ls_detailed(dir.path())?.collect();
+        let detailed: Vec<_> = ls_detailed(dir.path())?
+            .collect::<crate::Result<Vec<_>>>()?;
         assert!(detailed.iter().any(|entry| entry.path == file));
 
-        let walk_entries: Vec<_> = walk_detailed(dir.path())?.collect();
+        let walk_entries: Vec<_> = walk_detailed(dir.path())?
+            .collect::<crate::Result<Vec<_>>>()?;
         assert!(walk_entries.iter().any(|entry| entry.path == file));
         Ok(())
     }
@@ -698,7 +878,8 @@ mod tests {
         assert!(move_target.exists());
         assert!(!copy_target.exists());
 
-        let files: Vec<_> = walk_files(&move_target)?.collect();
+        let files: Vec<_> = walk_files(&move_target)?
+            .collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_name().unwrap().to_string_lossy(), "data.txt");
 
@@ -709,25 +890,31 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
         )?
-        .collect();
+        .collect::<crate::Result<Vec<_>>>()?;
         assert!(!globbed.is_empty());
 
-        let filtered: Vec<_> = filter_extension(Shell::from_iter(globbed.clone()), "txt").collect();
+        let filtered: Vec<_> = filter_extension(
+            Shell::from_iter(globbed.clone().into_iter().map(Ok)),
+            "txt",
+        )
+        .collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(filtered.len(), globbed.len());
 
-        let filtered_size: Vec<_> = filter_size(Shell::from_iter(globbed.clone()), 1).collect();
+        let filtered_size: Vec<_> =
+            filter_size(Shell::from_iter(globbed.clone().into_iter().map(Ok)), 1)
+                .collect::<crate::Result<Vec<_>>>()?;
         assert_eq!(filtered_size.len(), globbed.len());
 
         let filtered_recent: Vec<_> = filter_modified_since(
-            Shell::from_iter(globbed.clone()),
+            Shell::from_iter(globbed.clone().into_iter().map(Ok)),
             SystemTime::now() - Duration::from_secs(60),
         )
-        .collect();
+        .collect::<crate::Result<Vec<_>>>()?;
         assert!(!filtered_recent.is_empty());
 
         let dest_dir = tempdir()?;
         copy_entries(
-            Shell::from_iter(globbed),
+            Shell::from_iter(globbed.into_iter().map(Ok)),
             move_target.parent().unwrap(),
             dest_dir.path(),
         )?;
@@ -755,10 +942,10 @@ mod tests {
         rm(&file)?;
         let removed_path = file.clone();
         let removed = next_event(&mut events, move |event| match event {
-            WatchEvent::Removed(path) => path == &removed_path,
+            WatchEvent::Removed { path, .. } => path == &removed_path,
             _ => false,
         })?;
-        assert!(matches!(removed, WatchEvent::Removed(path) if path == file));
+        assert!(matches!(removed, WatchEvent::Removed { path, .. } if path == file));
         Ok(())
     }
 

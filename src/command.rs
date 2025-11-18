@@ -83,7 +83,7 @@ impl Command {
     /// Makes the process inherit the parent's stdin rather than capturing it.
     pub fn inherit_stdin(mut self, inherit: bool) -> Self {
         self.inherit_stdin = inherit;
-        if !inherit {
+        if inherit {
             self.stdin = None;
         }
         self

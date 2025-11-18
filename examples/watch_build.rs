@@ -17,7 +17,7 @@ fn main() -> qshr::Result<()> {
                 println!("Change detected at {}", entry.path.display());
                 sh("echo rebuilding").run()?;
             }
-            WatchEvent::Removed(path) => {
+            WatchEvent::Removed { path, .. } => {
                 println!("Removed {}", path.display());
             }
         }

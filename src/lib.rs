@@ -34,7 +34,7 @@ pub use shell::Shell;
 ///
 /// fn main() -> qshr::Result<()> {
 ///     for path in ls(".")? {
-///         println!("{}", path.display());
+///         println!("{}", path?.display());
 ///     }
 ///
 ///     let lines = cmd("cargo").arg("--version").lines()?;
