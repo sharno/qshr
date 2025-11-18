@@ -42,7 +42,7 @@ fn main() -> qshr::Result<()> {
         rm(&mirror_dir)?;
     }
 
-    let rustc_version = cmd("rustc").arg("--version").read()?;
+    let rustc_version = cmd("rustc").arg("--version").stdout_text()?;
     println!("rustc -> {rustc_version}");
     Ok(())
 }

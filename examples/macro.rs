@@ -5,7 +5,7 @@ fn main() -> qshr::Result<()> {
         println!("== macro powered script ==");
         "echo hello via macro";
 
-        let rustc = cmd("rustc").arg("--version").read()?;
+        let rustc = cmd("rustc").arg("--version").stdout_text()?;
         println!("rustc -> {}", rustc.trim());
 
         "echo piping through more" | "more";

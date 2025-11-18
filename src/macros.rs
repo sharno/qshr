@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn literal_command_executes() -> crate::Result<()> {
-        let output = literal_command("echo literal-test").read()?;
+        let output = literal_command("echo literal-test").stdout_text()?;
         assert!(output.contains("literal-test"));
         Ok(())
     }

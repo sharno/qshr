@@ -66,7 +66,7 @@ fn main() -> qshr::Result<()> {
         env "RUST_BACKTRACE" = "1";
         "echo RUST_BACKTRACE=$RUST_BACKTRACE";
 
-        let rustc = cmd("rustc").arg("--version").read()?;
+        let rustc = cmd("rustc").arg("--version").stdout_text()?;
         println!("rustc -> {}", rustc.trim());
 
         "echo listing src" | "more";
@@ -93,11 +93,11 @@ String literals inside the macro run as shell commands automatically, and you ca
 use qshr::{cmd, cmd as cmd_fn};
 
 fn main() -> qshr::Result<()> {
-    let output = cmd!("git", "status", "--short").read()?;
+    let output = cmd!("git", "status", "--short").stdout_text()?;
     println!("{output}");
 
     // Equivalent builder-style version.
-    let fallback = cmd_fn("git").arg("status").arg("--short").read()?;
+    let fallback = cmd_fn("git").arg("status").arg("--short").stdout_text()?;
     assert_eq!(output, fallback);
     Ok(())
 }
@@ -116,12 +116,12 @@ fn main() -> qshr::Result<()> {
         "cargo test --lib";
 
         for path in &tracked {
-            let summary = cmd("wc").arg("-l").arg(path).read()?;
+            let summary = cmd("wc").arg("-l").arg(path).stdout_text()?;
             print!("{summary}");
         };
 
         {
-            let status = cmd("git").args(["status", "--short"]).read()?;
+            let status = cmd("git").args(["status", "--short"]).stdout_text()?;
             println!("git status:\n{status}");
         };
 
@@ -132,6 +132,34 @@ fn main() -> qshr::Result<()> {
 ```
 
 Within `qshr!`, any Rust statement is permitted, so you can loop, branch, or shadow variables while the string literals do the repetitive shell work for you.
+
+### 6. Lazy filesystem helpers
+
+Every filesystem iterator (`ls`, `walk_files`, `glob_entries`, etc.) yields a `Shell<Result<_>>`, so you can lazily stream and short-circuit as needed:
+
+```rust
+use qshr::prelude::*;
+
+fn main() -> qshr::Result<()> {
+    let recent: Vec<_> = walk_files("src")?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            entry
+                .modified()
+                .ok()
+                .and_then(|time| time.elapsed().ok())
+                .filter(|age| *age.as_secs() < 300)
+                .map(|_| entry)
+        })
+        .take(10)
+        .collect();
+
+    // When you want to collect fallible entries, use `collect::<qshr::Result<_>>()?`.
+    let all: Vec<_> = walk_files("src")?.collect::<qshr::Result<Vec<_>>>()?;
+    println!("First {} files, total {}.", recent.len(), all.len());
+    Ok(())
+}
+```
 
 ## Features
 

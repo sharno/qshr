@@ -2,12 +2,7 @@
 
 ### Filesystem & Streaming
 
-- Ensure all filesystem helpers return `Shell<Result<_>>` lazily; remove lingering eager `Vec` collections and document the pattern (`collect::<Result<_>>()?`).
 - Rework `read_lines`/`cat` to stream via iterator adapters instead of buffering entire files, keeping memory flat for large inputs.
-
-### Command/Pipeline API
-
-- Break compatibility to rename `Command::read`/`Pipeline::read` to clearer names (`stdout_text` or similar) and have `run` return `ExitStatus` for better inspection.
 
 ### Shell Core Improvements
 

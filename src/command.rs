@@ -148,13 +148,19 @@ impl Command {
     }
 
     /// Returns the command stdout decoded as UTF-8 text.
+    #[deprecated(note = "use `stdout_text` instead")]
     pub fn read(&self) -> Result<String> {
+        self.stdout_text()
+    }
+
+    /// Returns the command stdout decoded as UTF-8 text.
+    pub fn stdout_text(&self) -> Result<String> {
         self.output()?.stdout_string()
     }
 
     /// Returns stdout split by lines into a [`Shell`].
     pub fn lines(&self) -> Result<Shell<String>> {
-        let text = self.read()?;
+        let text = self.stdout_text()?;
         let lines = text
             .lines()
             .map(|line| line.trim_end_matches('\r').to_string())
@@ -524,7 +530,12 @@ impl Pipeline {
         last.ok_or_else(|| Error::Io(std::io::Error::other("empty pipeline")))
     }
 
+    #[deprecated(note = "use `stdout_text` instead")]
     pub fn read(&self) -> Result<String> {
+        self.stdout_text()
+    }
+
+    pub fn stdout_text(&self) -> Result<String> {
         self.output()?.stdout_string()
     }
 
@@ -534,7 +545,7 @@ impl Pipeline {
     }
 
     pub fn lines(&self) -> Result<Shell<String>> {
-        let text = self.read()?;
+        let text = self.stdout_text()?;
         let lines = text
             .lines()
             .map(|line| line.trim_end_matches('\r').to_string())
@@ -713,7 +724,7 @@ mod tests {
     #[test]
     fn pipeline_chains_basic_commands() -> Result<()> {
         let pipeline = sh("echo foo").pipe(sh("more"));
-        let output = pipeline.read()?;
+        let output = pipeline.stdout_text()?;
         assert!(output.to_lowercase().contains("foo"));
         Ok(())
     }
