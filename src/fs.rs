@@ -750,6 +750,30 @@ pub fn glob_entries(pattern: impl AsRef<str>) -> Result<Shell<Result<PathEntry>>
     }))))
 }
 
+/// Cached glob results for reuse across multiple operations.
+#[derive(Debug, Clone)]
+pub struct GlobCache {
+    entries: Vec<PathEntry>,
+}
+
+impl GlobCache {
+    /// Resolves `pattern` immediately, storing `PathEntry` data in memory.
+    pub fn new(pattern: impl AsRef<str>) -> Result<Self> {
+        let entries = glob_entries(pattern)?.collect::<Result<Vec<_>>>()?;
+        Ok(Self { entries })
+    }
+
+    /// Returns the cached entries.
+    pub fn entries(&self) -> &[PathEntry] {
+        &self.entries
+    }
+
+    /// Consumes the cache, returning owned entries.
+    pub fn into_entries(self) -> Vec<PathEntry> {
+        self.entries
+    }
+}
+
 /// Filters entries to only those matching the provided extension (case-insensitive).
 pub fn filter_extension(
     entries: Shell<Result<PathEntry>>,
