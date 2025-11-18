@@ -420,6 +420,8 @@ where
     }
 }
 
+impl<T> std::iter::FusedIterator for WindowIter<T> where T: Clone {}
+
 struct InterleaveIter<T> {
     a: Box<dyn Iterator<Item = T> + 'static>,
     b: Box<dyn Iterator<Item = T> + 'static>,
@@ -507,6 +509,8 @@ impl<T> Iterator for ChunkIter<T> {
         if chunk.is_empty() { None } else { Some(chunk) }
     }
 }
+
+impl<T> std::iter::FusedIterator for ChunkIter<T> {}
 
 #[cfg(test)]
 mod tests {
