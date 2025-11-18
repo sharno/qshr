@@ -528,6 +528,11 @@ impl Pipeline {
         self.output()?.stdout_string()
     }
 
+    /// Executes the pipeline ignoring stdout/stderr, returning only success.
+    pub fn run(&self) -> Result<()> {
+        self.output().map(|_| ())
+    }
+
     pub fn lines(&self) -> Result<Shell<String>> {
         let text = self.read()?;
         let lines = text

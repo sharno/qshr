@@ -57,16 +57,22 @@ fn main() -> qshr::Result<()> {
 ### 4. Use the `qshr!` macro
 
 ```rust
-use qshr::qshr;
+use qshr::{prelude::*, qshr};
 
 fn main() -> qshr::Result<()> {
     qshr! {
         println!("Running scripted commands...");
-        sh("echo hi from macro").run()?;
-        Ok(())
+        "echo hi from macro";
+
+        let rustc = cmd("rustc").arg("--version").read()?;
+        println!("rustc -> {}", rustc.trim());
+
+        "echo listing src" | "more";
     }
 }
 ```
+
+String literals inside the macro run as shell commands automatically, and you can join them with `|` to build pipelines. Regular Rust statements (like the `let rustc = ...` line) work alongside the command sugar so you can still capture output or branch as needed.
 
 ## Features
 
