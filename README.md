@@ -54,6 +54,20 @@ fn main() -> qshr::Result<()> {
 }
 ```
 
+### 4. Use the `qshr!` macro
+
+```rust
+use qshr::qshr;
+
+fn main() -> qshr::Result<()> {
+    qshr! {
+        println!("Running scripted commands...");
+        sh("echo hi from macro").run()?;
+        Ok(())
+    }
+}
+```
+
 ## Features
 
 - `parallel`: enables `Shell::chunk_map_parallel` via `rayon`.
