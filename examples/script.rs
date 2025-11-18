@@ -2,7 +2,7 @@ use qshr::prelude::*;
 
 fn main() -> qshr::Result<()> {
     println!("== checking versions ==");
-    let rustc = cmd("rustc").arg("--version").read()?;
+    let rustc = cmd("rustc").arg("--version").stdout_text()?;
     println!("rustc: {}", rustc.trim());
 
     println!("== listing *.rs in src ==");

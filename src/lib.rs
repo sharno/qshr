@@ -63,7 +63,7 @@ mod tests {
     fn macro_runs_script() -> Result<()> {
         qshr! {
             "echo macro works";
-            let output = cmd("rustc").arg("--version").read()?;
+            let output = cmd("rustc").arg("--version").stdout_text()?;
             assert!(output.contains("rustc"));
             "echo macro works" | "more";
         }?;
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn cmd_macro_builds_command() -> Result<()> {
-        let output = cmd!("sh", "-c", "echo cmd-macro").read()?;
+        let output = cmd!("sh", "-c", "echo cmd-macro").stdout_text()?;
         assert!(output.contains("cmd-macro"));
         Ok(())
     }

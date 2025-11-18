@@ -13,13 +13,13 @@ fn main() -> qshr::Result<()> {
 
         println!("== line counts for tracked files ==");
         for path in &tracked {
-            let summary = cmd("wc").arg("-l").arg(path).read()?;
+            let summary = cmd("wc").arg("-l").arg(path).stdout_text()?;
             print!("{summary}");
         };
 
         println!("== recent git status ==");
         {
-            let status = cmd("git").args(["status", "--short"]).read()?;
+            let status = cmd("git").args(["status", "--short"]).stdout_text()?;
             println!("{status}");
         };
 
