@@ -2,11 +2,15 @@ use crate::{Error, Result, Shell};
 
 use std::{
     ffi::OsString,
+    fmt,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStderr, ChildStdout, Command as StdCommand, ExitStatus, Output, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver},
+    },
     thread,
 };
 
@@ -26,7 +30,7 @@ pub struct Command {
     env: Vec<(OsString, OsString)>,
     clear_env: bool,
     current_dir: Option<PathBuf>,
-    stdin: Option<Vec<u8>>,
+    stdin: Option<StdinSource>,
     inherit_stdin: bool,
 }
 
@@ -80,7 +84,18 @@ impl Command {
 
     /// Feeds data into the command's stdin.
     pub fn stdin(mut self, data: impl Into<Vec<u8>>) -> Self {
-        self.stdin = Some(data.into());
+        self.stdin = Some(StdinSource::Bytes(data.into()));
+        self.inherit_stdin = false;
+        self
+    }
+
+    /// Streams from a reader without buffering all input.
+    pub fn stdin_reader<R>(mut self, reader: R) -> Self
+    where
+        R: Read + Send + 'static,
+    {
+        self.stdin = Some(StdinSource::reader(reader));
+        self.inherit_stdin = false;
         self
     }
 
@@ -134,12 +149,9 @@ impl Command {
         command.stdout(Stdio::inherit());
         command.stderr(Stdio::inherit());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            stdin.write_all(input)?;
-        }
+        let stdin_handle = feed_child_stdin(&mut child, &self.stdin)?;
         let status = child.wait()?;
+        wait_stdin_writer(stdin_handle)?;
         if status.success() {
             Ok(())
         } else {
@@ -178,11 +190,7 @@ impl Command {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            stdin.write_all(input)?;
-        }
+        let stdin_handle = feed_child_stdin(&mut child, &self.stdin)?;
         let stdout = child
             .stdout
             .take()
@@ -235,6 +243,8 @@ impl Command {
                             status,
                             stderr: stdout_output,
                         }));
+                    } else if let Err(err) = wait_stdin_writer(stdin_handle) {
+                        let _ = tx.send(Err(err));
                     }
                 }
                 Err(err) => {
@@ -277,11 +287,16 @@ impl Command {
     /// Executes the command asynchronously (requires the `async` feature).
     #[cfg(feature = "async")]
     pub async fn output_async(&self) -> Result<CommandOutput> {
+        if matches!(self.stdin.as_ref(), Some(StdinSource::Reader(_))) {
+            return Err(Error::Io(std::io::Error::other(
+                "stdin_reader is not supported in async mode",
+            )));
+        }
         let mut command = self.build_tokio_command();
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin
+        if let Some(StdinSource::Bytes(input)) = &self.stdin
             && let Some(mut stdin) = child.stdin.take()
         {
             stdin.write_all(input).await?;
@@ -327,11 +342,7 @@ impl Command {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            stdin.write_all(input)?;
-        }
+        let stdin_handle = feed_child_stdin(&mut child, &self.stdin)?;
         let stdout = child
             .stdout
             .take()
@@ -384,6 +395,8 @@ impl Command {
                             status,
                             stderr: stderr_output,
                         }));
+                    } else if let Err(err) = wait_stdin_writer(stdin_handle) {
+                        let _ = tx.send(Err(err));
                     }
                 }
                 Err(err) => {
@@ -416,12 +429,10 @@ impl Command {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut child = command.spawn()?;
-        if let Some(input) = &self.stdin
-            && let Some(mut stdin) = child.stdin.take()
-        {
-            stdin.write_all(input)?;
-        }
-        Ok(child.wait_with_output()?)
+        let stdin_handle = feed_child_stdin(&mut child, &self.stdin)?;
+        let output = child.wait_with_output()?;
+        wait_stdin_writer(stdin_handle)?;
+        Ok(output)
     }
 
     fn build_std_command(&self) -> StdCommand {
@@ -464,6 +475,81 @@ impl Command {
         }
         command
     }
+}
+
+#[derive(Clone)]
+enum StdinSource {
+    Bytes(Vec<u8>),
+    Reader(Arc<Mutex<Option<Box<dyn Read + Send>>>>),
+}
+
+impl StdinSource {
+    fn reader<R>(reader: R) -> Self
+    where
+        R: Read + Send + 'static,
+    {
+        StdinSource::Reader(Arc::new(Mutex::new(Some(Box::new(reader)))))
+    }
+}
+
+impl fmt::Debug for StdinSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StdinSource::Bytes(data) => f.debug_tuple("Bytes").field(&data.len()).finish(),
+            StdinSource::Reader(_) => f.write_str("Reader(..)"),
+        }
+    }
+}
+
+type StdinJoinHandle = thread::JoinHandle<std::io::Result<()>>;
+
+fn feed_child_stdin(
+    child: &mut Child,
+    source: &Option<StdinSource>,
+) -> Result<Option<StdinJoinHandle>> {
+    match source {
+        Some(StdinSource::Bytes(data)) => {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| Error::Io(std::io::Error::other("missing stdin pipe")))?;
+            stdin.write_all(data)?;
+            Ok(None)
+        }
+        Some(StdinSource::Reader(shared)) => {
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| Error::Io(std::io::Error::other("missing stdin pipe")))?;
+            let reader = {
+                let mut guard = shared.lock().unwrap();
+                guard.take().ok_or_else(|| {
+                    Error::Io(std::io::Error::other("stdin reader already consumed"))
+                })?
+            };
+            let handle = thread::spawn(move || {
+                let mut reader = reader;
+                let mut stdin = stdin;
+                std::io::copy(&mut reader, &mut stdin)?;
+                stdin.flush()?;
+                Ok(())
+            });
+            Ok(Some(handle))
+        }
+        None => Ok(None),
+    }
+}
+
+fn wait_stdin_writer(handle: Option<StdinJoinHandle>) -> Result<()> {
+    if let Some(handle) = handle {
+        let result = handle.join().map_err(|err| {
+            Error::Io(std::io::Error::other(format!(
+                "stdin writer task panicked: {err:?}"
+            )))
+        })?;
+        result.map_err(Error::Io)?;
+    }
+    Ok(())
 }
 
 /// Helper to create a [`Command`] from a program name.
@@ -513,6 +599,7 @@ pub struct Pipeline {
 struct RunningStage {
     child: Child,
     program: OsString,
+    stdin_handle: Option<thread::JoinHandle<std::io::Result<()>>>,
 }
 
 #[derive(Debug)]
@@ -521,6 +608,7 @@ struct FinalStage {
     program: OsString,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
+    stdin_handle: Option<thread::JoinHandle<std::io::Result<()>>>,
 }
 
 impl Pipeline {
@@ -539,8 +627,14 @@ impl Pipeline {
     /// Executes the pipeline and returns the last stage's output.
     pub fn output(&self) -> Result<CommandOutput> {
         let (running, final_stage) = self.spawn_pipeline(true, true, false, false)?;
-        let FinalStage { child, program, .. } = final_stage;
+        let FinalStage {
+            child,
+            program,
+            stdin_handle,
+            ..
+        } = final_stage;
         let output = child.wait_with_output()?;
+        wait_stdin_writer(stdin_handle)?;
         wait_running_stages(running)?;
         if !output.status.success() {
             return Err(Error::Command {
@@ -569,9 +663,13 @@ impl Pipeline {
     pub fn run(&self) -> Result<()> {
         let (running, final_stage) = self.spawn_pipeline(false, false, false, false)?;
         let FinalStage {
-            mut child, program, ..
+            mut child,
+            program,
+            stdin_handle,
+            ..
         } = final_stage;
         let status = child.wait()?;
+        wait_stdin_writer(stdin_handle)?;
         if !status.success() {
             return Err(Error::Command {
                 program,
@@ -628,6 +726,7 @@ impl Pipeline {
             program,
             mut stdout,
             mut stderr,
+            stdin_handle,
         } = final_stage;
         let stdout = stdout
             .take()
@@ -674,6 +773,10 @@ impl Pipeline {
                         }));
                         return;
                     }
+                    if let Err(err) = wait_stdin_writer(stdin_handle) {
+                        let _ = tx.send(Err(err));
+                        return;
+                    }
                 }
                 Err(err) => {
                     let _ = tx.send(Err(Error::Io(err)));
@@ -695,6 +798,7 @@ impl Pipeline {
             program,
             mut stdout,
             mut stderr,
+            stdin_handle,
         } = final_stage;
         let stdout = stdout
             .take()
@@ -739,6 +843,10 @@ impl Pipeline {
                             status,
                             stderr: stdout_output,
                         }));
+                        return;
+                    }
+                    if let Err(err) = wait_stdin_writer(stdin_handle) {
+                        let _ = tx.send(Err(err));
                         return;
                     }
                 }
@@ -789,8 +897,10 @@ impl Pipeline {
         for (idx, stage) in self.stages.iter().enumerate() {
             let mut command = StdCommand::new(&stage.program);
             stage.configure_std_command(&mut command);
+            let mut uses_pipeline_input = false;
             if let Some(stdout) = previous_stdout.take() {
                 command.stdin(Stdio::from(stdout));
+                uses_pipeline_input = true;
             } else if stage.stdin.is_some() {
                 command.stdin(Stdio::piped());
             } else if stage.inherit_stdin {
@@ -811,13 +921,11 @@ impl Pipeline {
             }
 
             let mut child = command.spawn()?;
-            if stage.stdin.is_some()
-                && previous_stdout.is_none()
-                && let Some(mut stdin) = child.stdin.take()
-                && let Some(input) = &stage.stdin
-            {
-                stdin.write_all(input)?;
-            }
+            let stdin_handle = if uses_pipeline_input {
+                None
+            } else {
+                feed_child_stdin(&mut child, &stage.stdin)?
+            };
 
             if is_last {
                 let stdout_handle =
@@ -843,6 +951,7 @@ impl Pipeline {
                         program: stage.program.clone(),
                         stdout: stdout_handle,
                         stderr: stderr_handle,
+                        stdin_handle,
                     },
                 ));
             }
@@ -855,6 +964,7 @@ impl Pipeline {
             running.push(RunningStage {
                 child,
                 program: stage.program.clone(),
+                stdin_handle,
             });
         }
 
@@ -865,6 +975,7 @@ impl Pipeline {
 fn wait_running_stages(stages: Vec<RunningStage>) -> Result<()> {
     for mut stage in stages {
         let status = stage.child.wait()?;
+        wait_stdin_writer(stage.stdin_handle)?;
         if !status.success() {
             return Err(Error::Command {
                 program: stage.program,
@@ -897,6 +1008,7 @@ impl<T> Iterator for ReceiverIter<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use tempfile::tempdir;
 
     fn noop_command() -> Command {
@@ -912,6 +1024,14 @@ mod tests {
             Command::new("cmd").arg("/C").arg("echo warn 1>&2")
         } else {
             Command::new("sh").arg("-c").arg("echo warn 1>&2")
+        }
+    }
+
+    fn stdin_passthrough_command() -> Command {
+        if cfg!(windows) {
+            Command::new("cmd").arg("/C").arg("more")
+        } else {
+            Command::new("cat")
         }
     }
 
@@ -934,6 +1054,16 @@ mod tests {
         let lines: Result<Vec<_>> = pipeline.stream_lines()?.collect();
         let lines = lines?;
         assert!(lines.iter().any(|line| line.to_lowercase().contains("foo")));
+        Ok(())
+    }
+
+    #[test]
+    fn stdin_reader_streams() -> Result<()> {
+        let cursor = Cursor::new(b"stream-from-reader\n".to_vec());
+        let output = stdin_passthrough_command()
+            .stdin_reader(cursor)
+            .stdout_text()?;
+        assert!(output.contains("stream-from-reader"));
         Ok(())
     }
 

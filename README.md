@@ -137,7 +137,24 @@ fn main() -> qshr::Result<()> {
 
 Within `qshr!`, any Rust statement is permitted, so you can loop, branch, or shadow variables while the string literals do the repetitive shell work for you.
 
-### 6. Lazy filesystem helpers
+### 6. Stream stdin from a reader
+
+```rust
+use qshr::prelude::*;
+use std::fs::File;
+
+fn main() -> qshr::Result<()> {
+    let file = File::open("README.md")?;
+    let output = cmd("wc").arg("-l").stdin_reader(file).stdout_text()?;
+    println!("README has {output}");
+    Ok(())
+}
+```
+
+When you need to stream data into a child process (large files, sockets, pipes),
+`stdin_reader` avoids buffering everything into memory up front.
+
+### 7. Lazy filesystem helpers
 
 Every filesystem iterator (`ls`, `walk_files`, `glob_entries`, etc.) yields a `Shell<Result<_>>`, so you can lazily stream and short-circuit as needed:
 
@@ -224,6 +241,10 @@ if let Ok(event) = rx.try_recv() {
 }
 ```
 
+Rename operations surface as `WatchEvent::Renamed`, giving you access to both
+`event.path()` (the destination) and `event.from_path()` for the source when
+files move without being rewritten.
+
 When you need to reuse glob metadata multiple times (copy/move operations, filtering), resolve once via `GlobCache::new("src/**/*.rs")` and call `.entries()` to avoid repeated `fs::metadata` calls.
 
 Need backwards iteration? Wrap in `DoubleEndedShell::from_vec(vec)` and call `next_back()` on it before converting back into a plain `Shell`.
@@ -243,8 +264,8 @@ Browse `examples/` for small scripts—`script.rs`, `watch_glob.rs`,
 ## Git hooks
 
 There is a repo-local pre-commit hook at `.githooks/pre-commit` that runs
-`cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-and `cargo test --all-targets --all-features` before allowing a commit. Opt in by
+`cargo fmt --all` and `cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features`
+before allowing a commit. Opt in by
 pointing Git at the hooks directory once:
 
 ```
