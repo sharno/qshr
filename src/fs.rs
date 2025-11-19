@@ -20,7 +20,10 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use glob::{Pattern, glob as glob_iter};
 use notify::Watcher as _;
-use notify::{self, Event, EventKind, RecommendedWatcher, RecursiveMode, event::RemoveKind};
+use notify::{
+    self, Event, EventKind, RecommendedWatcher, RecursiveMode,
+    event::{ModifyKind, RemoveKind, RenameMode},
+};
 
 /// Metadata about a filesystem path captured during listing operations.
 #[derive(Debug, Clone)]
@@ -264,7 +267,15 @@ pub fn copy_entries(
 pub enum WatchEvent {
     Created(PathEntry),
     Modified(PathEntry),
-    Removed { path: PathBuf, was_dir: bool },
+    Removed {
+        path: PathBuf,
+        was_dir: bool,
+    },
+    Renamed {
+        from: PathBuf,
+        to: PathBuf,
+        entry: Option<PathEntry>,
+    },
 }
 
 impl WatchEvent {
@@ -272,6 +283,10 @@ impl WatchEvent {
         match self {
             WatchEvent::Created(entry) | WatchEvent::Modified(entry) => &entry.path,
             WatchEvent::Removed { path, .. } => path,
+            WatchEvent::Renamed { to, entry, .. } => entry
+                .as_ref()
+                .map(|entry| entry.path.as_path())
+                .unwrap_or(to),
         }
     }
 
@@ -279,6 +294,17 @@ impl WatchEvent {
         match self {
             WatchEvent::Created(entry) | WatchEvent::Modified(entry) => entry.is_dir(),
             WatchEvent::Removed { was_dir, .. } => *was_dir,
+            WatchEvent::Renamed { entry, .. } => {
+                entry.as_ref().map(PathEntry::is_dir).unwrap_or(false)
+            }
+        }
+    }
+
+    /// Returns the source path for rename events, if available.
+    pub fn from_path(&self) -> Option<&Path> {
+        match self {
+            WatchEvent::Renamed { from, .. } => Some(from.as_path()),
+            _ => None,
         }
     }
 }
@@ -419,6 +445,16 @@ pub fn debounce_watch(
                     entry.modified().unwrap_or_else(SystemTime::now),
                 ),
                 WatchEvent::Removed { path, .. } => (path.clone(), SystemTime::now()),
+                WatchEvent::Renamed { to, entry, .. } => (
+                    entry
+                        .as_ref()
+                        .map(|entry| entry.path.clone())
+                        .unwrap_or_else(|| to.clone()),
+                    entry
+                        .as_ref()
+                        .and_then(|entry| entry.modified())
+                        .unwrap_or_else(SystemTime::now),
+                ),
             };
             let should_emit = match &last_emitted {
                 Some((last_path, last_time)) => {
@@ -505,9 +541,16 @@ pub async fn watch_filtered_async(
 }
 
 fn convert_event(event: Event) -> Vec<WatchEvent> {
+    match event.kind {
+        EventKind::Modify(ModifyKind::Name(mode)) => convert_rename_event(mode, event.paths),
+        kind => convert_standard_event(kind, event.paths),
+    }
+}
+
+fn convert_standard_event(kind: EventKind, paths: Vec<PathBuf>) -> Vec<WatchEvent> {
     let mut out = Vec::new();
-    for path in event.paths {
-        match &event.kind {
+    for path in paths {
+        match &kind {
             EventKind::Create(_) => {
                 if let Some(entry) = path_entry_for(&path) {
                     out.push(WatchEvent::Created(entry));
@@ -519,13 +562,50 @@ fn convert_event(event: Event) -> Vec<WatchEvent> {
                 }
             }
             EventKind::Remove(kind) => {
-                let was_dir = matches!(kind, RemoveKind::Folder | RemoveKind::Any);
+                let was_dir = matches!(kind, RemoveKind::Folder | RemoveKind::Any) || path.is_dir();
                 out.push(WatchEvent::Removed { path, was_dir });
             }
             _ => {}
         }
     }
     out
+}
+
+fn convert_rename_event(mode: RenameMode, paths: Vec<PathBuf>) -> Vec<WatchEvent> {
+    match mode {
+        RenameMode::Both | RenameMode::Any => {
+            if paths.len() >= 2 {
+                let mut iter = paths.into_iter();
+                let from = iter.next().unwrap();
+                let to = iter.next().unwrap();
+                let entry = path_entry_for(&to);
+                vec![WatchEvent::Renamed { from, to, entry }]
+            } else {
+                convert_as_modified(paths)
+            }
+        }
+        RenameMode::To => paths
+            .into_iter()
+            .filter_map(|path| path_entry_for(&path).map(WatchEvent::Created))
+            .collect(),
+        RenameMode::From => paths
+            .into_iter()
+            .map(|path| WatchEvent::Removed {
+                was_dir: path_entry_for(&path)
+                    .map(|entry| entry.is_dir())
+                    .unwrap_or(false),
+                path,
+            })
+            .collect(),
+        RenameMode::Other => convert_as_modified(paths),
+    }
+}
+
+fn convert_as_modified(paths: Vec<PathBuf>) -> Vec<WatchEvent> {
+    paths
+        .into_iter()
+        .filter_map(|path| path_entry_for(&path).map(WatchEvent::Modified))
+        .collect()
 }
 
 fn path_entry_for(path: &Path) -> Option<PathEntry> {
@@ -988,6 +1068,35 @@ mod tests {
             _ => false,
         })?;
         assert!(matches!(removed, WatchEvent::Removed { path, .. } if path == file));
+        Ok(())
+    }
+
+    #[test]
+    fn watcher_reports_renames() -> crate::Result<()> {
+        let dir = tempdir()?;
+        let from = dir.path().join("from.txt");
+        let to = dir.path().join("to.txt");
+        let mut events = watch(dir.path())?;
+
+        write_text(&from, "seed")?;
+        // Consume the create event to avoid races in assertions.
+        let _ = next_event(&mut events, |_| true)?;
+
+        std::fs::rename(&from, &to)?;
+        let renamed = next_event(&mut events, |event| {
+            matches!(event, WatchEvent::Renamed { .. })
+        })?;
+        match &renamed {
+            WatchEvent::Renamed {
+                from: old, to: new, ..
+            } => {
+                assert_eq!(old, &from);
+                assert_eq!(new, &to);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(renamed.path(), to.as_path());
+        assert_eq!(renamed.from_path(), Some(from.as_path()));
         Ok(())
     }
 

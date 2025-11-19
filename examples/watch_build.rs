@@ -20,6 +20,9 @@ fn main() -> qshr::Result<()> {
             WatchEvent::Removed { path, .. } => {
                 println!("Removed {}", path.display());
             }
+            WatchEvent::Renamed { from, to, .. } => {
+                println!("Renamed {} -> {}", from.display(), to.display());
+            }
         }
     }
     Ok(())
