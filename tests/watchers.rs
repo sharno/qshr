@@ -4,7 +4,7 @@ use qshr::{Error, prelude::*};
 use tempfile::tempdir;
 
 fn next_event(
-    mut events: Shell<qshr::Result<WatchEvent>>,
+    events: Shell<qshr::Result<WatchEvent>>,
     predicate: impl Fn(&WatchEvent) -> bool,
     timeout: Duration,
 ) -> qshr::Result<WatchEvent> {
