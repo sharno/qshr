@@ -9,7 +9,7 @@ fn next_event(
     timeout: Duration,
 ) -> qshr::Result<WatchEvent> {
     let start = std::time::Instant::now();
-    while let Some(event) = events.next() {
+    for event in events {
         let event = event?;
         if predicate(&event) {
             return Ok(event);
@@ -82,14 +82,17 @@ fn debounce_watch_suppresses_duplicate_events() -> qshr::Result<()> {
     let file = dir.path().join("debounce.txt");
     write_text(&file, "first")?;
     let metadata = fs::metadata(&file)?;
-    let entry = PathEntry { path: file.clone(), metadata };
+    let entry = PathEntry {
+        path: file.clone(),
+        metadata,
+    };
     let shell = Shell::from_iter(vec![
         Ok(WatchEvent::Created(entry.clone())),
         Ok(WatchEvent::Created(entry.clone())),
         Ok(WatchEvent::Created(entry)),
     ]);
-    let deduped = debounce_watch(shell, Duration::from_millis(200))
-        .collect::<qshr::Result<Vec<_>>>()?;
+    let deduped =
+        debounce_watch(shell, Duration::from_millis(200)).collect::<qshr::Result<Vec<_>>>()?;
     assert_eq!(deduped.len(), 1);
     Ok(())
 }
