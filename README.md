@@ -278,13 +278,4 @@ You can reset to Git’s default hooks later with `git config --unset core.hooks
 
 The crate aims to stay compact and dependency-light. Contributions are welcome!
 
-## Submodules
 
-This repository vendors the original Haskell [`turtle`](https://github.com/Gabriella439/turtle)
-project as a Git submodule (`turtle/`). After cloning, make sure to run:
-
-```
-git submodule update --init
-```
-
-so the submodule is checked out locally.
